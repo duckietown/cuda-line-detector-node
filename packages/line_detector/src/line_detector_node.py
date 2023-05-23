@@ -147,30 +147,32 @@ class LineDetectorNode(DTROS):
 
         # Decode from compressed image with OpenCV
         try:
-            image = self.bridge.compressed_imgmsg_to_cv2(image_msg)
+            obtained_image = self.bridge.compressed_imgmsg_to_cv2(image_msg)
         except ValueError as e:
             self.logerr(f"Could not decode image: {e}")
             return
+        gpu_image = cv2.cuda_GpuMat()
+        gpu_image.upload(obtained_image)
 
         # Perform color correction
         if self.ai_thresholds_received:
-            image = self.ai.apply_color_balance(
-                self.anti_instagram_thresholds["lower"], self.anti_instagram_thresholds["higher"], image
+            gpu_image = self.ai.apply_color_balance(
+                self.anti_instagram_thresholds["lower"], self.anti_instagram_thresholds["higher"], gpu_image
             )
 
-        # Resize the image to the desired dimensions
-        height_original, width_original = image.shape[0:2]
+        # Resize the gpu_image to the desired dimensions
+        height_original, width_original = gpu_image.shape[0:2]
         img_size = (self._img_size[1], self._img_size[0])
         if img_size[0] != width_original or img_size[1] != height_original:
-            image = cv2.cuda.resize(image, img_size, interpolation=cv2.INTER_NEAREST)
-        image = image[self._top_cutoff :, :, :]
+            gpu_image = cv2.cuda.resize(gpu_image, img_size, interpolation=cv2.INTER_NEAREST)
+        gpu_image = gpu_image[self._top_cutoff :, :, :]
 
-        # mirror the image if left-hand traffic mode is set
+        # mirror the gpu_image if left-hand traffic mode is set
         if self._traffic_mode.value == "LHT":
-            image = np.fliplr(image)
+            gpu_image = np.fliplr(gpu_image)
 
         # Extract the line segments for every color
-        self.detector.setImage(image)
+        self.detector.setImage(gpu_image)
         detections = {
             color: self.detector.detectLines(ranges) for color, ranges in list(self.color_ranges.items())
         }
@@ -206,6 +208,9 @@ class LineDetectorNode(DTROS):
 
         # Publish the message
         self.pub_lines.publish(segment_list)
+        
+        # Download the image from gpu memory
+        image = gpu_image.download()
 
         # If there are any subscribers to the debug topics, generate a debug image and publish it
         if self.pub_d_segments.get_num_connections() > 0:
